@@ -89,43 +89,20 @@ application state pending = do
                 return s'
             talk conn state client
           _ -> do
-            clients <- readMVar state
-            uuid <- getUUID mess
-            let client = Client (T.pack $ user mess) (T.pack $ M.fromJust uuid) conn
-            if not $ clientExists client clients then 
-              modifyMVar_ state $ \s -> do
-                let s' = addClient client s
-                broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event uuid (user mess) "user-joined" (Just $ A.String (userId client))))) s'
-                return s'
-              talk conn state client
-            else
-              putStrLn "Client exists"
-
-            let maybeId = documentId mess in
-              case maybeId of
-                Just docId -> do
-                  putStrLn "=====FILTER====="
-                  putStrLn docId
-                  putStrLn $ show clients
-                  putStrLn $ show (filter (\client -> dId client == T.pack docId) clients)
-                  putStrLn "=====FILTER====="
-                  broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event (Just docId) (user mess) (event mess)  (payload mess)))) (filter (\client -> dId client == T.pack docId) clients)
-                Nothing ->
-                  broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event (documentId mess) (user mess) (event mess)  (payload mess)))) clients
-            --putStrLn "No message"
-            --putStrLn $ show mess
+            putStrLn "No message"
+            putStrLn $ show mess
         where
           c = M.fromMaybe (A.String "") (payload mess)
           A.String cli = c
           -- client = (cli, conn)
           client = Client (T.pack $ M.fromJust $ documentId mess) (T.pack $ user mess) conn
           disconnect = do
+            putStrLn "disconnected"
             putStrLn $ show $ user mess
             -- Remove client and return new state
             s <- modifyMVar state $ \s ->
               let s' = removeClient client s in return (s', s')
-            --broadcast ((userId client) `mappend` " disconnected") s
-            putStrLn "disconnected"
+            broadcast ((userId client) `mappend` " disconnected") s
       Nothing ->
         putStrLn "No message"
 
