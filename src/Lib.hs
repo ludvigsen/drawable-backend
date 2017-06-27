@@ -390,7 +390,7 @@ dbConfig = PG.ConnectInfo {
 
 app :: IO ()
 app = do
-  -- (DB.createPostgresqlPool "" 10
+  pool <- DB.createPostgresqlPool "" 10
   conn <- PG.connect dbConfig
   state <- newMVar newServerState
   WS.runServer "0.0.0.0" 9162 $ application state conn
