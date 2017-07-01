@@ -1,8 +1,12 @@
+{-# OPTIONS -fglasgow-exts #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Lib
     ( app
@@ -22,23 +26,33 @@ import Data.Aeson as A
 import qualified Data.Maybe as M
 import Data.UUID.V4 as U
 import Data.UUID as U
-import qualified Data.Map as Map
-import Data.HashMap.Lazy (HashMap)
-import qualified Data.Foldable as F
 import qualified Data.Vector as V
 import qualified Data.Scientific as S
-import GHC.Int
-import GHC.Word
-
-import qualified Database.Persist as DB
-import qualified Database.Persist.Postgresql as DB
-
-import qualified Database.PostgreSQL.Simple as PG
-import qualified Database.PostgreSQL.Simple.ToField as PG
-
 
 import qualified Network.WebSockets as WS
 
+import           Opaleye (Column, Table(Table),
+                          required, optional, (.==), (.<),
+                          arrangeDeleteSql, arrangeInsertManySql,
+                          arrangeUpdateSql, arrangeInsertManyReturningSql,
+                          PGInt4, PGFloat8)
+import           Data.Profunctor.Product (p6)
+import           Data.Profunctor.Product.Default (def)
+import qualified Opaleye.Internal.Unpackspec as U
+import qualified Opaleye.PGTypes as P
+import qualified Opaleye.Constant as C
+import qualified Opaleye.Manipulation as OM
+import qualified Database.PostgreSQL.Simple as PG
+
+table :: Table
+    (Maybe (Column PGInt4), Column P.PGText, Column P.PGText, Column P.PGText, Maybe (Column P.PGJsonb), Column P.PGText)
+    (Column PGInt4, Column P.PGText, Column P.PGText, Column P.PGText, Column P.PGJsonb, Column P.PGText)
+table = Table "events" (p6 ( optional "id"
+                              , required "event_id"
+                              , required "document_id"
+                              , required "type"
+                              , optional "payload"
+                              , required "user_id"))
 
 
 {-| Key of an attribute
@@ -52,7 +66,7 @@ type Key =
 data DElement
     = M Float Float
     | L Float Float
-    deriving (Generic, Show, PG.ToField)
+    deriving (Generic, Show, Read)
 
 instance ToJSON DElement where
   toJSON (M f1 f2) =
@@ -75,14 +89,12 @@ instance FromJSON DElement where
       else
         return $ M 1 1
 
-instance PG.ToField [DElement]
-
 {-| Value of an attribute
 -}
 data Value
     = D ([DElement])
     | Value String String
-    deriving (Generic, Show, PG.ToField)
+    deriving (Generic, Show, Read)
 
 instance ToJSON Lib.Value where
   toJSON (D list) =
@@ -110,15 +122,11 @@ instance FromJSON Lib.Value where
 type TagName =
     Text
 
-instance PG.ToField [Lib.Value]
-
-instance PG.ToField [SvgAst]
-
 {-| SvgAst type
 -}
 data SvgAst
   = Tag TagName [Lib.Value] [SvgAst]
-  deriving (Generic, Show, PG.ToField)
+  deriving (Generic, Show, Read)
 
 fold :: (SvgAst -> a -> a) -> a -> SvgAst -> a
 fold fn base ast =
@@ -128,8 +136,6 @@ fold fn base ast =
 
         _ ->
             base
-
-
 
 instance FromJSON SvgAst where
   parseJSON (Object v) =
@@ -162,7 +168,7 @@ data Payload
     | AstList [SvgAst]
     | Uuid String
     | Empty
-    deriving (Generic, Show, PG.ToField)
+    deriving (Generic, Show, Read)
 
 instance ToJSON Payload where
   toJSON (Ast ast) =
@@ -187,7 +193,7 @@ data Event = Event { documentId :: Maybe String
                    , user :: String
                    , event :: String
                    , payload :: Payload
-                   } deriving (Generic, Show, ToJSON, FromJSON)
+                   } deriving (Generic, Show, ToJSON, FromJSON, Read)
 
 getId :: [Lib.Value] -> String
 getId [] = "defaultId"
@@ -224,12 +230,6 @@ removeLists :: [SvgAst] -> [SvgAst] -> [SvgAst]
 removeLists removing lists =
     map (Lib.fold (removeList removing) (Tag "comment" [] [])) lists
 
-
-{-removeListsFromEvents :: [SvgAst] -> [Event] -> [Event]
-removeListFromClient :: Event -> ServerState -> ServerState
-removeListFromClient (Event { documentId, user, event, (AstList removed)}) (clients, map) =
-  (clients, Map.update removeListsFromEvents user map)
--}
 
 updateSvgAst :: Event -> ServerState -> ServerState
 updateSvgAst ev state =
@@ -273,19 +273,14 @@ clientExists client = any ((== userId client) . userId)
 addClient :: Client -> ServerState -> ServerState
 addClient client state = (client : state)
 
-persistEvent :: PG.Connection -> Event -> IO GHC.Int.Int64
-persistEvent conn Event { documentId = dId, user = usr, event = ev, payload = p } =
- PG.execute conn "insert into events (document_id, type, user_id, payload) values (?, ?, ?, ?)"
-             (dId, ev, usr, p)
-
--- addEvent :: Event -> ServerState -> ServerState
--- addEvent (Event {documentId = Just docId, user = userId, event = ev, payload = pl}) clients = clients
-  -- where
---     existing = M.fromMaybe [] $ Map.lookup docId events
---     updated = existing ++ [(Event (Just docId) userId ev pl)]
---     newMap = Map.insert docId updated events
--- add
-  -- Event _ state = state
+persistEvent :: PG.Connection -> Event -> IO ()
+persistEvent conn (Event { documentId = dId
+                    , user = u
+                    , event = ev
+                    , payload = p
+                    }) = do
+  OM.runInsertMany conn table (return (Nothing, P.pgString (M.fromMaybe "" dId), P.pgString "dummy", P.pgString ev, Nothing, P.pgString u))
+  return ()
 
 removeClient :: Client -> ServerState -> ServerState
 removeClient client state = filter ((/= userId client) . userId) state
@@ -312,8 +307,6 @@ connect conn dbConn state mess = forever $ flip finally disconnect $ do
   modifyMVar_ state $ \s -> do
     let s' = addClient client s
     broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event uuid (user mess) "user-joined" (Uuid $ T.unpack $ (userId client))))) s'
-    -- let events = M.fromMaybe [] (Map.lookup (M.fromMaybe "" (documentId mess)) (snd s))
-    -- forM_ events $ \ev -> broadcast (TL.toStrict (TL.decodeUtf8 (A.encode ev))) [client]
     return s'
   talk conn dbConn state client
     where
@@ -325,7 +318,7 @@ connect conn dbConn state mess = forever $ flip finally disconnect $ do
           let s' = removeClient client s in return (s', s')
         broadcast ((userId client) `mappend` " disconnected") s
 
---application :: MVar ServerState -> PG.Connection -> WS.Pending -> WS.ServerApp
+--application :: MVar ServerState -> WS.Pending -> WS.ServerApp
 application state conn pending = do
     c <- WS.acceptRequest pending
     WS.forkPingThread c 30
@@ -346,7 +339,6 @@ application state conn pending = do
             case documentId mess of
               Just docId -> do
                 persistEvent conn mess
-                -- modifyMVar_ state $ \s -> return $ addEvent mess s
                 broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event (documentId mess) (user mess) (event mess) (payload mess)))) (filter (\client -> dId client == T.pack docId) serverState)
                 if clientExists client serverState then putStrLn "Client exists" else connect c conn state mess
               Nothing ->
@@ -364,17 +356,17 @@ application state conn pending = do
 talk :: WS.Connection -> PG.Connection -> MVar ServerState -> Client -> IO ()
 talk conn dbConn state Client { userId = user } = forever $ do
   msg <- WS.receiveData conn
-  let message = A.decode (TL.encodeUtf8 (TL.fromStrict msg)) :: Maybe Event
+  let message = A.decode (TL.encodeUtf8 (TL.fromStrict msg)) :: Maybe (Event)
   serverState <- readMVar state
   case message of
     Just mess ->
       let maybeId = documentId mess in
         case maybeId of
           Just docId -> do
-            -- modifyMVar_ state $ \s -> return $ addEvent mess s
             persistEvent dbConn mess
             broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event (Just docId) (T.unpack user) (event mess)  (payload mess)))) (filter (\client -> dId client == T.pack docId) serverState)
-          Nothing ->
+          Nothing -> do
+            persistEvent dbConn mess
             broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event (documentId mess) (T.unpack user) (event mess)  (payload mess)))) serverState
     Nothing ->
       broadcast msg serverState
@@ -388,9 +380,9 @@ dbConfig = PG.ConnectInfo {
 , PG.connectDatabase = "drawable"
                              }
 
+
 app :: IO ()
 app = do
-  pool <- DB.createPostgresqlPool "" 10
-  conn <- PG.connect dbConfig
   state <- newMVar newServerState
+  conn <- PG.connect dbConfig
   WS.runServer "0.0.0.0" 9162 $ application state conn
