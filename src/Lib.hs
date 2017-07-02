@@ -306,6 +306,7 @@ connect :: WS.Connection -> PG.Connection -> MVar ServerState -> Event -> IO ()
 connect conn dbConn state mess = forever $ flip finally disconnect $ do
   modifyMVar_ state $ \s -> do
     let s' = addClient client s
+    putStrLn (show $ uuid)
     broadcast (TL.toStrict (TL.decodeUtf8 (A.encode $ Event uuid (user mess) "user-joined" (Uuid $ T.unpack $ (userId client))))) s'
     return s'
   talk conn dbConn state client
