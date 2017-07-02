@@ -28,7 +28,7 @@ import Data.UUID.V4 as U
 import Data.UUID as U
 import qualified Data.Vector as V
 import qualified Data.Scientific as S
-
+import qualified Data.ByteString.Lazy as BL
 import qualified Network.WebSockets as WS
 
 import           Opaleye (Column, Table(Table),
@@ -279,7 +279,7 @@ persistEvent conn (Event { documentId = dId
                     , event = ev
                     , payload = p
                     }) = do
-  OM.runInsertMany conn table (return (Nothing, P.pgString (M.fromMaybe "" dId), P.pgString "dummy", P.pgString ev, Nothing, P.pgString u))
+  OM.runInsertMany conn table (return (Nothing, P.pgString (M.fromMaybe "" dId), P.pgString "dummy", P.pgString ev, Just $ P.pgStrictJSONB $ BL.toStrict (A.encode p), P.pgString u))
   return ()
 
 removeClient :: Client -> ServerState -> ServerState
